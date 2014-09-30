@@ -1,5 +1,5 @@
 /*
- * SystemJS v0.8.2
+ * SystemJS v0.9.0
  */
 
 (function($__global) {
@@ -72,68 +72,6 @@ $__global.upgradeSystemLoader = function() {
   }
 
   
-/*
- * Script tag fetch
- */
-
-function scriptLoader(loader) {
-  if (typeof indexOf == 'undefined')
-    indexOf = Array.prototype.indexOf;
-
-  var head = document.getElementsByTagName('head')[0];
-
-  // call this functione everytime a wrapper executes
-  loader.onScriptLoad = function() {};
-
-  // override fetch to use script injection
-  loader.fetch = function(load) {
-    return new Promise(function(resolve, reject) {
-      var s = document.createElement('script');
-      s.async = true;
-
-      function complete(evt) {
-        if (s.readyState && s.readyState != 'loaded' && s.readyState != 'complete')
-          return;
-        cleanup();
-
-        // this runs synchronously after execution
-        // we now need to tell the wrapper handlers that
-        // this load record has just executed
-        loader.onScriptLoad(load);
-
-        resolve('');
-      }
-
-      function error(evt) {
-        cleanup();
-        reject(evt);
-      }
-
-      if (s.attachEvent) {
-        s.attachEvent('onreadystatechange', complete);
-      }
-      else {
-        s.addEventListener('load', complete, false);
-        s.addEventListener('error', error, false);
-      }
-
-      s.src = load.address;
-      head.appendChild(s);
-
-      function cleanup() {
-        if (s.detachEvent)
-          s.detachEvent('onreadystatechange', complete);
-        else {
-          s.removeEventListener('load', complete, false);
-          s.removeEventListener('error', error, false);
-        }
-        head.removeChild(s);
-      }
-    });
-  }
-
-  loader.scriptLoader = true;
-}
 /*
  * Meta Extension
  *
@@ -397,10 +335,10 @@ function register(loader) {
       if (anonRegister)
         load.metadata.entry = anonRegister;
       
-      if (anonRegister || calledRegister)
+      if (calledRegister) {
         load.metadata.format = load.metadata.format || 'register';
-      if (calledRegister)
         load.metadata.registered = true;
+      }
     }
   }
 
@@ -562,8 +500,6 @@ function register(loader) {
       exports = loader.get(name);
       if (!exports)
         throw "System Register: The module requested " + name + " but this was not declared as a dependency";
-      if (exports.__useDefault)
-        exports = exports['default'];
     }
 
     else {
@@ -576,6 +512,9 @@ function register(loader) {
       exports = entry.module.exports;
     }
 
+    if ((!entry || entry.declarative) && exports && exports.__useDefault)
+      return exports['default'];
+    
     return exports;
   }
 
@@ -777,7 +716,6 @@ function register(loader) {
           loader.defined[load.name] = undefined;
 
           var module = loader.newModule(entry.declarative ? entry.module.exports : { 'default': entry.module.exports, '__useDefault': true });
-          entry.module.module = module;
 
           // return the defined module object
           return module;
@@ -896,8 +834,8 @@ function core(loader) {
     // support ES6 alias modules ("export * from 'module';") without needing Traceur
     var match;
     if ((load.metadata.format == 'es6' || !load.metadata.format) && (match = load.source.match(aliasRegEx))) {
-      load.metadata.format = 'cjs';
-      load.source = 'module.exports = require("' + (match[1] || match[2]) + '");\n';
+      load.metadata.format = 'es6';
+      load.metadata.alias = match[1] || match[2];
     }
 
     // detect ES6
@@ -927,6 +865,17 @@ function core(loader) {
           return loader.newModule({});
         }
       };
+    }
+    if (load.metadata.format == 'alias') {
+      return Promise.resolve(loader.normalize(load.metadata.alias, load.name, load.address))
+      .then(function(alias) {
+        return {
+          deps: [alias],
+          execute: function() {
+            return System.get(alias);
+          }
+        };
+      });
     }
     return loaderInstantiate.call(loader, load);
   }
@@ -1245,8 +1194,10 @@ function amd(loader) {
     var onScriptLoad = loader.onScriptLoad;
     loader.onScriptLoad = function(load) {
       onScriptLoad(load);
-      if (anonDefine || defineBundle)
+      if (anonDefine || defineBundle) {
         load.metadata.format = 'defined';
+        load.metadata.registered = true;
+      }
 
       if (anonDefine) {
         load.metadata.deps = load.metadata.deps ? load.metadata.deps.concat(anonDefine.deps) : anonDefine.deps;
@@ -1276,20 +1227,20 @@ function amd(loader) {
 
       // remove system dependencies
       var requireIndex, exportsIndex, moduleIndex;
-      
+
       if ((requireIndex = indexOf.call(deps, 'require')) != -1) {
-        
+
         deps.splice(requireIndex, 1);
 
         var factoryText = factory.toString();
 
         deps = deps.concat(getCJSDeps(factoryText, requireIndex));
       }
-        
+
 
       if ((exportsIndex = indexOf.call(deps, 'exports')) != -1)
         deps.splice(exportsIndex, 1);
-      
+
       if ((moduleIndex = indexOf.call(deps, 'module')) != -1)
         deps.splice(moduleIndex, 1);
 
@@ -1308,10 +1259,10 @@ function amd(loader) {
           // add back in system dependencies
           if (moduleIndex != -1)
             depValues.splice(moduleIndex, 0, module);
-          
+
           if (exportsIndex != -1)
             depValues.splice(exportsIndex, 0, exports);
-          
+
           if (requireIndex != -1)
             depValues.splice(requireIndex, 0, makeRequire(module.id, require, loader));
 
@@ -1414,14 +1365,16 @@ function amd(loader) {
       console.log('is amd');
       load.metadata.format = 'amd';
 
-      createDefine(loader);
+      if (loader.execute !== false) {
+        createDefine(loader);
 
-      loader.__exec(load);
+        loader.__exec(load);
 
-      removeDefine(loader);
+        removeDefine(loader);
 
-      if (!anonDefine && !defineBundle && !isNode)
-        throw "AMD module " + load.name + " did not define";
+        if (!anonDefine && !defineBundle && !isNode)
+          throw "AMD module " + load.name + " did not define";
+      }
 
       if (anonDefine) {
         load.metadata.deps = load.metadata.deps ? load.metadata.deps.concat(anonDefine.deps) : anonDefine.deps;
@@ -1638,6 +1591,10 @@ function plugins(loader) {
     var loader = this;
 
     var name = load.name;
+
+    // only fetch the plugin itself if this name isn't defined
+    if (this.defined && this.defined[name])
+      return loaderLocate.call(this, load);
 
     // plugin
     var pluginIndex = name.lastIndexOf('!');
@@ -2069,7 +2026,6 @@ function depCache(loader) {
   }
 }
   
-scriptLoader(System);
 meta(System);
 register(System);
 core(System);
